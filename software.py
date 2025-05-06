@@ -418,8 +418,6 @@ def comparar_radar_estacoes(radar_data, dados_estacoes, raio_max_km=5):
     # Converter a coluna de data das estações para datetime
     dados_estacoes['Data'] = pd.to_datetime(dados_estacoes['Data da Coleta'])
     
-    # Converter para UTC se as estações estão em RMC (fuso horário local)
-    # Supondo que RMC está em UTC-3 (por exemplo, horário de Brasília)
     dados_estacoes['Data_UTC'] = dados_estacoes['Data'].dt.tz_localize('America/Sao_Paulo').dt.tz_convert('UTC')
     
     # Extrair tempo do radar (já em UTC)
@@ -595,15 +593,17 @@ class RadarProcessorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Processador de Dados de Radar")
-        self.root.geometry("800x600")
+        self.root.geometry("1000x1000")
         
         self.radar_file = None
         self.stations_folder = None
         self.radar_data = None
         self.radar_data_calib = None
         self.results = None
-        
+
+        self.calib_stats = {}
         self.create_widgets()
+        
         
     def create_widgets(self):
 
@@ -634,9 +634,34 @@ class RadarProcessorApp:
         
         self.status_text = tk.Text(main_frame, height=10, state=tk.DISABLED)
         self.status_text.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        stats_frame = ttk.LabelFrame(main_frame, text="Estatísticas de Calibração", padding=10)
+        stats_frame.pack(fill=tk.X, pady=5)
+
+        self.stats_labels = {
+            'n_samples': ttk.Label(stats_frame, text="Amostras válidas:"),
+            'zh_bias': ttk.Label(stats_frame, text="Bias ZH:"),
+            'zdr_bias': ttk.Label(stats_frame, text="Bias ZDR:"),
+            'rms_error': ttk.Label(stats_frame, text="Erro RMS:"),
+            'a': ttk.Label(stats_frame, text="Parâmetro a:"),
+            'b': ttk.Label(stats_frame, text="Parâmetro b:"),
+            'c': ttk.Label(stats_frame, text="Parâmetro c:")
+        }
         
         result_frame = ttk.Frame(main_frame)
         result_frame.pack(fill=tk.X, pady=5)
+
+        for i, (key, label) in enumerate(self.stats_labels.items()):
+            label.grid(row=i//2, column=(i%2)*2, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(stats_frame, text="N/A").grid(
+                row=i//2, column=(i%2)*2+1, sticky=tk.W, padx=5, pady=2)
+            self.stats_labels[key].value_label = stats_frame.grid_slaves(
+                row=i//2, column=(i%2)*2+1)[0]
+            
+        ttk.Button(stats_frame, text="Exportar Estatísticas", 
+                 command=self.export_stats).grid(
+                     row=4, column=0, columnspan=4, pady=5)
+
         
         ttk.Button(result_frame, text="Mostrar Gráficos Comparativos", 
                   command=self.show_comparison_plots).pack(side=tk.LEFT, padx=5)
@@ -678,6 +703,46 @@ class RadarProcessorApp:
         processing_thread = threading.Thread(target=self.run_processing)
         processing_thread.start()
     
+    def update_stats_display(self, params):
+        """Atualiza os labels com os valores das estatísticas"""
+        if params is None:
+            for label in self.stats_labels.values():
+                label.value_label.config(text="N/A")
+            return
+        
+        # Formata os valores com precisão adequada
+        stats_data = {
+            'n_samples': f"{params['n_samples']:,}",
+            'zh_bias': f"{params['zh_bias']:.2f} dBZ",
+            'zdr_bias': f"{params['zdr_bias']:.2f} dB",
+            'rms_error': f"{params['rms_error']:.4f}",
+            'a': f"{params['a']:.4e}",
+            'b': f"{params['b']:.2f}",
+            'c': f"{params['c']:.2f}"
+        }
+        
+        for key, label in self.stats_labels.items():
+            label.value_label.config(text=stats_data[key])
+
+    def export_stats(self):
+            """Exporta as estatísticas para um arquivo CSV"""
+            if not self.calib_stats:
+                messagebox.showwarning("Aviso", "Nenhuma estatística disponível para exportar")
+                return
+            
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=(("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")))
+            
+            if file_path:
+                try:
+                    df = pd.DataFrame([self.calib_stats])
+                    df.to_csv(file_path, index=False)
+                    self.log_status(f"Estatísticas exportadas para: {file_path}")
+                except Exception as e:
+                    messagebox.showerror("Erro", f"Falha ao exportar: {str(e)}")
+
+    
     def run_processing(self):
         try:
             self.log_status("Iniciando processamento...")
@@ -691,10 +756,20 @@ class RadarProcessorApp:
             self.log_status("Realizando calibração...")
             calib_params = calibrar_zh_zdr_kdp(self.radar_data)
             if calib_params:
+                self.calib_stats = calib_params.copy()
                 self.radar_data_calib = aplicar_calibracao(self.radar_data, calib_params)
                 self.log_status("Calibração concluída com sucesso!")
+                self.root.after(0, lambda: self.update_stats_display(calib_params))
             else:
+                self.calib_stats = {}
                 self.log_status("Calibração não foi possível")
+                self.root.after(0, lambda: self.update_stats_display(None))
+
+            # if calib_params:
+            #     self.radar_data_calib = aplicar_calibracao(self.radar_data, calib_params)
+            #     self.log_status("Calibração concluída com sucesso!")
+            # else:
+            #     self.log_status("Calibração não foi possível")
             
             if self.stations_folder:
                 try:
